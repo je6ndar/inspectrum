@@ -45,6 +45,7 @@ list(APPEND inspectrum_sources
     crashlog.cpp
     cursor.cpp
     cursors.cpp
+    freqcursors.cpp
     main.cpp
     fft.cpp
     frequencydemod.cpp

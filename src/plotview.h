@@ -26,6 +26,7 @@
 #include <QPaintEvent>
 
 #include "cursors.h"
+#include "freqcursors.h"
 #include "inputsource.h"
 #include "plot.h"
 #include "samplesource.h"
@@ -57,6 +58,7 @@ public:
 
 signals:
     void timeSelectionChanged(float time, float offset);
+    void freqSelectionChanged(double lowHz, double highHz);
     void segmentsChanged(int segments);
     void tunerChanged(double centreHz, double bandwidthHz);
     void renderTimeChanged(int ms);
@@ -70,6 +72,10 @@ public slots:
     void lockCursors(bool locked);
     void resetCursorState();
     void setCursorGridOpacity(int opacity);
+    void freqCursorsMoved();
+    void enableFreqCursors(bool enabled);
+    void setFreqSelection(double lowHz, double highHz);
+    range_t<double> getSelectedFreqs() { return selectedFreqs; }
     void enableScales(bool enabled);
     void enableAnnotations(bool enabled);
     void enableAnnotationCommentsTooltips(bool enabled);
@@ -128,6 +134,7 @@ protected:
 
 private:
     Cursors cursors;
+    FreqCursors freqCursors;
     SampleSource<std::complex<float>> *mainSampleSource = nullptr;
     SpectrogramPlot *spectrogramPlot = nullptr;
     std::vector<std::unique_ptr<Plot>> plots;
@@ -145,14 +152,33 @@ private:
     bool cursorsLocked = false;
     bool hadCursors = false;
     range_t<size_t> savedSelectedSamples = {0, 0};
+    bool freqCursorsEnabled = false;
+    /* shift+click / shift+drag cursor placement */
+    bool cursorPlaceDrag = false;
+    bool cursorPlaceMoved = false;
+    QPoint cursorPlaceStart;
+    bool hadFreqCursors = false;
+    /* bandwidth cursor positions, kept in Hz so they stay on the signal
+     * across scrolling, FFT size changes and Y zoom */
+    range_t<double> selectedFreqs = {0, 0};
+    range_t<double> savedSelectedFreqs = {0, 0};
     double sampleRate = 0.0;
     bool timeScaleEnabled = false;
     int scrollZoomStepsAccumulated = 0;
+    double wheelScrollAccum = 0;   // sub-pixel wheel remainder
     bool zoomFromWheel = false;
     bool annotationCommentsEnabled = false;
 
     void addPlot(Plot *plot);
     void emitTimeSelection();
+    void emitFreqSelection();
+    int spectrogramTop();
+    double freqAtViewportY(int y);
+    int viewportYForFreq(double hz);
+    void updateFreqCursorPositions();
+    bool cursorPlaceEvent(QEvent::Type type, QMouseEvent *event);
+    void applyCursorPlaceDrag(QPoint from, QPoint to);
+    void moveNearestCursorTo(int x);
     void updateThresholdPlots();
     void saveViewPosition(double &timeSec, double &freqHz);
     void restoreViewPosition(double timeSec, double freqHz);

@@ -44,6 +44,7 @@ public:
 signals:
     void fftOrZoomChanged(int fftSize, int zoomLevel);
     void openFile(QString fileName);
+    void formatChanged(QString fmt);
     void loadSessionFile(QString fileName);
     void symbolRateChanged(double rate);
     void saveSession();
@@ -53,6 +54,7 @@ signals:
     void offsetChanged(double seconds);
     void tunerCentreEdited(double hz);
     void tunerBandwidthEdited(double hz);
+    void freqCursorsToTuner();
     void bookmarkSelected(double timeSec, double freqHz);
     void avgChanged(int level);
     void tunerVisibleChanged(bool visible);
@@ -71,6 +73,7 @@ signals:
 
 public slots:
     void timeSelectionChanged(float time, float offset);
+    void freqSelectionChanged(double lowHz, double highHz);
     void zoomIn();
     void zoomOut();
     void tunerInfoChanged(double centreHz, double bandwidthHz);
@@ -90,11 +93,13 @@ private slots:
     void powerMaxChanged(int value);
     void fileOpenButtonClicked();
     void cursorsStateChanged(int state);
+    void freqCursorsStateChanged(int state);
 
 private:
     QWidget *widget;
     QFormLayout *layout;
     void clearCursorLabels();
+    void clearFreqCursorLabels();
     void fftOrZoomChanged(void);
 
 public:
@@ -104,6 +109,8 @@ public:
     QPushButton *fileOpenButton;
     QPushButton *saveSessionButton;
     QLineEdit *sampleRate;
+    QComboBox *formatCombo;
+    void setFormatText(const QString &fmt);
     QSlider *fftSizeSlider;
     QLabel *fftSizeLabel;
     QSlider *zoomLevelSlider;
@@ -128,6 +135,12 @@ public:
     QPushButton *autoDetectButton;
     QLabel *detectStatusLabel;
     QCheckBox *lsbFirstCheckBox;
+    QCheckBox *freqCursorsCheckBox;
+    QLabel *freqLowLabel;
+    QLabel *freqHighLabel;
+    QLabel *freqCentreLabel;
+    QLabel *bandwidthLabel;
+    QPushButton *freqToTunerButton;
     QLineEdit *tunerCentreEdit;
     QLineEdit *tunerBandwidthEdit;
     QCheckBox *maskOutOfBandCheckBox;

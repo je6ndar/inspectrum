@@ -59,7 +59,9 @@ int main(int argc, char *argv[])
         QProgressDialog progress("Optimizing FFT plans (first run)...",
                                  QString(), 0, 16);
         progress.setWindowModality(Qt::ApplicationModal);
-        progress.setMinimumDuration(0);
+        /* only surface the dialog if planning really is slow -- with
+         * usable wisdom the whole run takes a couple of milliseconds */
+        progress.setMinimumDuration(500);
         progress.setValue(0);
         QApplication::processEvents();
 

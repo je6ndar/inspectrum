@@ -65,6 +65,7 @@ MainWindow::MainWindow()
 
     // Connect dock inputs
     connect(dock, &SpectrogramControls::openFile, this, &MainWindow::openFile);
+    connect(dock, &SpectrogramControls::formatChanged, this, &MainWindow::formatSelected);
     connect(dock->sampleRate, static_cast<void (QLineEdit::*)(const QString&)>(&QLineEdit::textChanged), this, static_cast<void (MainWindow::*)(QString)>(&MainWindow::setSampleRate));
     connect(dock, static_cast<void (SpectrogramControls::*)(int, int)>(&SpectrogramControls::fftOrZoomChanged), plots, &PlotView::setFFTAndZoom);
     connect(dock->powerMaxSlider, &QSlider::valueChanged, plots, &PlotView::setPowerMax);
@@ -76,6 +77,7 @@ MainWindow::MainWindow()
     connect(dock->cursorsCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableCursors);
     connect(dock->cursorsLockCheckBox, &QCheckBox::toggled, plots, &PlotView::lockCursors);
     connect(dock->cursorGridSlider, &QSlider::valueChanged, plots, &PlotView::setCursorGridOpacity);
+    connect(dock->freqCursorsCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableFreqCursors);
     connect(dock->scalesCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableScales);
     connect(dock->annosCheckBox, &QCheckBox::stateChanged, plots, &PlotView::enableAnnotations);
     connect(dock->annosCheckBox, &QCheckBox::stateChanged, dock, &SpectrogramControls::enableAnnotations);
@@ -105,6 +107,15 @@ MainWindow::MainWindow()
 
     // Connect dock outputs
     connect(plots, &PlotView::timeSelectionChanged, dock, &SpectrogramControls::timeSelectionChanged);
+    connect(plots, &PlotView::freqSelectionChanged, dock, &SpectrogramControls::freqSelectionChanged);
+    connect(dock, &SpectrogramControls::freqCursorsToTuner, this, [this]() {
+        auto sel = plots->getSelectedFreqs();
+        double bw = sel.maximum - sel.minimum;
+        if (bw <= 0)
+            return;
+        plots->setTunerCentreHz((sel.minimum + sel.maximum) / 2);
+        plots->setTunerBandwidthHz(bw);
+    });
     connect(plots, &PlotView::segmentsChanged, dock->cursorSymbolsSpinBox, &QSpinBox::setValue);
     connect(plots, &PlotView::zoomIn, dock, &SpectrogramControls::zoomIn);
     connect(plots, &PlotView::zoomOut, dock, &SpectrogramControls::zoomOut);
@@ -197,6 +208,42 @@ void MainWindow::setSampleRate(double rate)
 void MainWindow::setFormat(QString fmt)
 {
     input->setFormat(fmt.toUtf8().constData());
+    dock->setFormatText(fmt);
+}
+
+/* Format picked in the controls panel: apply it and re-read the open
+ * file through the new adapter. */
+void MainWindow::formatSelected(QString fmt)
+{
+    QString fileName = input->getFileName();
+    if (fileName.isEmpty()) {
+        /* nothing open yet -- it applies to the next file */
+        input->setFormat(fmt.toUtf8().constData());
+        return;
+    }
+
+    std::string previous = input->getFormat();
+    input->setFormat(fmt.toUtf8().constData());
+
+    try {
+        input->openFile(fileName.toUtf8().constData());
+    }
+    catch (const std::exception &ex) {
+        QMessageBox msgBox(QMessageBox::Critical, "Inspectrum format error",
+                           QString("%1: %2").arg(fileName).arg(ex.what()));
+        msgBox.exec();
+
+        /* A failed open leaves the source half-switched (the old data is
+         * still mapped), so put the working format back. */
+        input->setFormat(previous);
+        dock->setFormatText(QString::fromStdString(previous));
+        try {
+            input->openFile(fileName.toUtf8().constData());
+        }
+        catch (const std::exception &) {
+            /* nothing left to fall back to */
+        }
+    }
 }
 
 void MainWindow::saveSession()
@@ -229,6 +276,7 @@ void MainWindow::saveSession()
     double sr = 0;
     parseSIValue(dock->sampleRate->text().toStdString(), sr);
     session["sampleRate"] = sr;
+    session["format"] = dock->formatCombo->currentData().toString();
 
     /* spectrogram settings */
     QJsonObject spectrogram;
@@ -270,6 +318,14 @@ void MainWindow::saveSession()
     cursors["sampleMin"] = (qint64)sel.minimum;
     cursors["sampleMax"] = (qint64)sel.maximum;
     session["cursors"] = cursors;
+
+    /* bandwidth (frequency) cursors */
+    QJsonObject freqCursors;
+    freqCursors["enabled"] = dock->freqCursorsCheckBox->isChecked();
+    auto freqSel = plots->getSelectedFreqs();
+    freqCursors["freqMin"] = freqSel.minimum;
+    freqCursors["freqMax"] = freqSel.maximum;
+    session["freqCursors"] = freqCursors;
 
     /* view state */
     QJsonObject view;
@@ -327,6 +383,7 @@ void MainWindow::loadSessionFile(const QString &fileName)
     dock->cursorGridSlider->setValue(80);
     dock->cursorsCheckBox->setChecked(false);
     dock->cursorsLockCheckBox->setChecked(false);
+    dock->freqCursorsCheckBox->setChecked(false);
     dock->cursorSymbolsSpinBox->setValue(1);
     dock->scalesCheckBox->setChecked(true);
     dock->annosCheckBox->setChecked(true);
@@ -365,6 +422,9 @@ void MainWindow::loadSessionFile(const QString &fileName)
 
     if (signalFile.isEmpty())
         signalFile = session["file"].toString();
+
+    /* the format has to be in place before the file is read */
+    setFormat(session["format"].toString());
 
     if (!signalFile.isEmpty())
         openFile(signalFile);
@@ -437,6 +497,19 @@ void MainWindow::loadSessionFile(const QString &fileName)
         };
         plots->setSelectedSamples(sel);
     }
+    /* bandwidth cursors -- stored in Hz, so the tuner / FFT state
+     * restored below doesn't invalidate them: the pixel positions are
+     * recomputed from the frequencies on the next view update */
+    QJsonObject freqCur = session["freqCursors"].toObject();
+    bool freqCurEnabled = freqCur["enabled"].toBool(false);
+    dock->freqCursorsCheckBox->setChecked(freqCurEnabled);
+    if (freqCurEnabled) {
+        double fMin = freqCur["freqMin"].toDouble();
+        double fMax = freqCur["freqMax"].toDouble();
+        if (fMax > fMin)
+            plots->setFreqSelection(fMin, fMax);
+    }
+
     int segments = cur["segments"].toInt(1);
     dock->cursorSymbolsSpinBox->blockSignals(true);
     dock->cursorSymbolsSpinBox->setValue(segments);

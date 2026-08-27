@@ -59,6 +59,36 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
      * time. parseSIValue itself rejects malformed input. */
     layout->addRow(new QLabel(tr("Sample rate:")), sampleRate);
 
+    /* Data format: same set the -f/--format command line option
+     * accepts. "Auto" leaves the choice to the file extension. */
+    formatCombo = new QComboBox(widget);
+    formatCombo->setToolTip("How to interpret the samples in the file.\n"
+                            "Auto uses the file extension; anything else\n"
+                            "overrides it and reloads the file.");
+    static const struct { const char *label; const char *fmt; } formats[] = {
+        { "Auto (file extension)",   ""      },
+        { "Complex float32 (cf32)",  "cf32"  },
+        { "Complex float64 (cf64)",  "cf64"  },
+        { "Complex int32 (cs32)",    "cs32"  },
+        { "Complex int16 (cs16)",    "cs16"  },
+        { "Complex int8 (cs8)",      "cs8"   },
+        { "Complex uint8 (cu8)",     "cu8"   },
+        { "Real float32 (f32)",      "f32"   },
+        { "Real float64 (f64)",      "f64"   },
+        { "Real int16 (s16)",        "s16"   },
+        { "Real int8 (s8)",          "s8"    },
+        { "Real uint8 (u8)",         "u8"    },
+        { "WAV (wav)",               "wav"   },
+    };
+    for (auto &f : formats)
+        formatCombo->addItem(tr(f.label), QString(f.fmt));
+    layout->addRow(new QLabel(tr("Data format:")), formatCombo);
+
+    connect(formatCombo, QOverload<int>::of(&QComboBox::activated),
+            this, [this](int index) {
+        emit formatChanged(formatCombo->itemData(index).toString());
+    });
+
     // View position & bookmarks
     layout->addRow(new QLabel(tr("<b>View</b>")));
 
@@ -379,6 +409,10 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     layout->addRow(new QLabel(tr("<b>Time selection</b>")));
 
     cursorsCheckBox = new QCheckBox(widget);
+    cursorsCheckBox->setToolTip("Vertical cursors to measure time.\n"
+                                "Shift+click moves the nearest cursor to the\n"
+                                "pointer; shift+drag sets the whole selection\n"
+                                "(right-click has the same as menu entries).");
     cursorsLockCheckBox = new QCheckBox(tr("Lock"), widget);
     cursorsLockCheckBox->setToolTip("Lock cursors to prevent accidental\n"
                                     "dragging while scrolling.");
@@ -436,6 +470,34 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     detectStatusLabel->setStyleSheet("QLabel { color: #aaa; font-size: 10px; }");
     layout->addRow(detectStatusLabel);
 
+    // Bandwidth (frequency) selection settings
+    layout->addRow(new QLabel(tr("<b>Bandwidth selection</b>")));
+
+    freqCursorsCheckBox = new QCheckBox(widget);
+    freqCursorsCheckBox->setToolTip("Horizontal cursors to measure the\n"
+                                    "bandwidth of a signal.\n"
+                                    "Drag a line to move it, or the band\n"
+                                    "between them to move both. Shift+drag\n"
+                                    "on the plot sets the band directly.");
+    layout->addRow(new QLabel(tr("Enable cursors:")), freqCursorsCheckBox);
+
+    freqHighLabel = new QLabel();
+    layout->addRow(new QLabel(tr("Freq high:")), freqHighLabel);
+
+    freqLowLabel = new QLabel();
+    layout->addRow(new QLabel(tr("Freq low:")), freqLowLabel);
+
+    bandwidthLabel = new QLabel();
+    layout->addRow(new QLabel(tr("Bandwidth:")), bandwidthLabel);
+
+    freqCentreLabel = new QLabel();
+    layout->addRow(new QLabel(tr("Centre:")), freqCentreLabel);
+
+    freqToTunerButton = new QPushButton("Set tuner to selection", widget);
+    freqToTunerButton->setToolTip("Move the tuner onto the measured band.");
+    freqToTunerButton->setEnabled(false);
+    layout->addRow(freqToTunerButton);
+
     // SigMF selection settings
     layout->addRow(new QLabel(tr("<b>SigMF Control</b>")));
 
@@ -458,6 +520,8 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
     connect(zoomLevelSlider, &QSlider::valueChanged, this, &SpectrogramControls::zoomLevelChanged);
     connect(fileOpenButton, &QPushButton::clicked, this, &SpectrogramControls::fileOpenButtonClicked);
     connect(cursorsCheckBox, &QCheckBox::stateChanged, this, &SpectrogramControls::cursorsStateChanged);
+    connect(freqCursorsCheckBox, &QCheckBox::stateChanged, this, &SpectrogramControls::freqCursorsStateChanged);
+    connect(freqToTunerButton, &QPushButton::clicked, this, &SpectrogramControls::freqCursorsToTuner);
     connect(powerMinSlider, &QSlider::valueChanged, this, &SpectrogramControls::powerMinChanged);
     connect(powerMaxSlider, &QSlider::valueChanged, this, &SpectrogramControls::powerMaxChanged);
     connect(saveSessionButton, &QPushButton::clicked, this, &SpectrogramControls::saveSession);
@@ -539,6 +603,21 @@ SpectrogramControls::SpectrogramControls(const QString & title, QWidget * parent
             this, [this](double) { markSettingsDirty(); });
 }
 
+/* Select the entry for `fmt` without emitting formatChanged (used when
+ * the format comes from the command line or a session file). Formats
+ * the combo doesn't list -- the aliases, or something new -- get an
+ * entry of their own so the panel always shows what is in effect. */
+void SpectrogramControls::setFormatText(const QString &fmt)
+{
+    int index = formatCombo->findData(fmt);
+    if (index < 0) {
+        formatCombo->addItem(tr("Custom (%1)").arg(fmt), fmt);
+        index = formatCombo->count() - 1;
+    }
+    QSignalBlocker block(formatCombo);
+    formatCombo->setCurrentIndex(index);
+}
+
 void SpectrogramControls::clearCursorLabels()
 {
     offsetEdit->setText("");
@@ -555,6 +634,39 @@ void SpectrogramControls::cursorsStateChanged(int state)
     }
 }
 
+void SpectrogramControls::clearFreqCursorLabels()
+{
+    freqLowLabel->setText("");
+    freqHighLabel->setText("");
+    bandwidthLabel->setText("");
+    freqCentreLabel->setText("");
+}
+
+void SpectrogramControls::freqCursorsStateChanged(int state)
+{
+    bool enabled = (state != Qt::Unchecked);
+    freqToTunerButton->setEnabled(enabled);
+    if (!enabled)
+        clearFreqCursorLabels();
+}
+
+void SpectrogramControls::freqSelectionChanged(double lowHz, double highHz)
+{
+    if (freqCursorsCheckBox->checkState() != Qt::Checked) {
+        clearFreqCursorLabels();
+        return;
+    }
+
+    freqHighLabel->setText(QString::fromStdString(
+        formatSIValueSigned(highHz, "Hz")));
+    freqLowLabel->setText(QString::fromStdString(
+        formatSIValueSigned(lowHz, "Hz")));
+    bandwidthLabel->setText(QString::fromStdString(
+        formatSIValueSigned(highHz - lowHz, "Hz")));
+    freqCentreLabel->setText(QString::fromStdString(
+        formatSIValueSigned((highHz + lowHz) / 2, "Hz")));
+}
+
 void SpectrogramControls::setDefaults()
 {
     loadBookmarks();
@@ -562,6 +674,7 @@ void SpectrogramControls::setDefaults()
 
     cursorsCheckBox->setCheckState(Qt::Unchecked);
     cursorSymbolsSpinBox->setValue(1);
+    freqCursorsCheckBox->setCheckState(Qt::Unchecked);
 
     annosCheckBox->setCheckState(Qt::Checked);
     commentsCheckBox->setCheckState(Qt::Checked);

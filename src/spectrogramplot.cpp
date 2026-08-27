@@ -185,16 +185,10 @@ void SpectrogramPlot::paintFrequencyScale(QPainter &painter, QRect &rect)
     if (fullHeight <= 0)
         return;
 
-    /* Hz per FFT bin (1 bin = 1 pixel in uncropped mode) */
-    double hzPerBin = (double)sampleRate / fullHeight;
-
-    double hzPerPixel = hzPerBin;
-
-    if (maskOutOfBand && tunerEnabled()) {
-        /* cropped: rect.height() pixels show height() bins */
-        if (rect.height() > 0 && height() > 0)
-            hzPerPixel = hzPerBin * height() / rect.height();
-    }
+    /* Hz per screen pixel, accounting for the Y zoom / crop window */
+    double hzPerPixel = this->hzPerPixel();
+    if (hzPerPixel <= 0.0)
+        return;
 
     int tickHeight = 50;
 
@@ -209,8 +203,9 @@ void SpectrogramPlot::paintFrequencyScale(QPainter &painter, QRect &rect)
     painter.setPen(pen);
     QFontMetrics fm(painter.font());
 
-    /* view center in pixels */
-    int viewCentrePx = rect.y() + rect.height() / 2;
+    /* pixel at which 0 Hz sits (not the middle of the plot when the
+     * visible bin window is off-centre) */
+    int viewCentrePx = rect.y() + (int)(plotYForFrequency(0.0) + 0.5);
 
     uint64_t tick = 0;
 
@@ -223,8 +218,11 @@ void SpectrogramPlot::paintFrequencyScale(QPainter &painter, QRect &rect)
         bool pyVis = tickpy >= rect.top() && tickpy <= rect.bottom();
         bool nyVis = tickny >= rect.top() && tickny <= rect.bottom();
 
-        /* stop if both ticks are outside the view */
-        if (!pyVis && !nyVis && tick > 0)
+        /* tickpy only moves up and tickny only moves down as tick grows,
+         * so once both have left the plot no later tick can be visible.
+         * (They can both be outside while a later one is inside when the
+         * Y zoom window sits away from 0 Hz.) */
+        if (tick > 0 && tickpy < rect.top() && tickny > rect.bottom())
             break;
 
         if (!inputSource->realSignal() && nyVis)
@@ -267,7 +265,7 @@ void SpectrogramPlot::paintFrequencyScale(QPainter &painter, QRect &rect)
             bool pyVis = tickpy >= rect.top() && tickpy <= rect.bottom();
             bool nyVis = tickny >= rect.top() && tickny <= rect.bottom();
 
-            if (!pyVis && !nyVis && tick > 0)
+            if (tick > 0 && tickpy < rect.top() && tickny > rect.bottom())
                 break;
 
             if (!inputSource->realSignal() && nyVis)
@@ -284,7 +282,8 @@ void SpectrogramPlot::paintFrequencyScale(QPainter &painter, QRect &rect)
 void SpectrogramPlot::paintAnnotations(QPainter &painter, QRect &rect, range_t<size_t> sampleRange)
 {
     // Pixel (from the top) at which 0 Hz sits
-    int zero = rect.y() + rect.height() / 2;
+    int zero = rect.y() + (int)(plotYForFrequency(0.0) + 0.5);
+    double hzPerPx = hzPerPixel();
 
     painter.save();
     QPen pen(Qt::white, 1, Qt::SolidLine);
@@ -319,8 +318,12 @@ void SpectrogramPlot::paintAnnotations(QPainter &painter, QRect &rect, range_t<s
             int stride = getStride();
             if (stride <= 0) stride = 1;
             int x = (int)(startDelta / stride);
-            int y = zero - frequency / sampleRate * rect.height();
-            int height = (a.frequencyRange.maximum - a.frequencyRange.minimum) / sampleRate * rect.height();
+            int y = (hzPerPx > 0)
+                  ? zero - (int)(frequency / hzPerPx)
+                  : zero;
+            int height = (hzPerPx > 0)
+                  ? (int)((a.frequencyRange.maximum - a.frequencyRange.minimum) / hzPerPx)
+                  : 0;
             int width = (int)((a.sampleRange.maximum - a.sampleRange.minimum) / (size_t)stride);
 
             // Draw the label 2 pixels above the box
@@ -700,6 +703,44 @@ int SpectrogramPlot::getNativePlotHeight()
     }
 
     return visibleBins;
+}
+
+/*
+ * Frequency <-> vertical pixel mapping.
+ *
+ * paintMid() stretches getNativePlotHeight() FFT bins, starting at
+ * getVisibleBinTop(), over height() pixels. Bin b holds frequency
+ * (0.5 - b/fftSize) * sampleRate, so DC sits at bin fftSize/2 (which
+ * is the middle of the plot only when the whole FFT is visible).
+ */
+double SpectrogramPlot::hzPerPixel()
+{
+    int plotH = height();
+    if (fftSize <= 0 || plotH <= 0 || sampleRate <= 0.0)
+        return 0.0;
+
+    return sampleRate * (double)getNativePlotHeight() / ((double)fftSize * plotH);
+}
+
+double SpectrogramPlot::frequencyAtPlotY(double y)
+{
+    int plotH = height();
+    if (fftSize <= 0 || plotH <= 0)
+        return 0.0;
+
+    double bin = getVisibleBinTop()
+               + y * (double)getNativePlotHeight() / plotH;
+    return (0.5 - bin / fftSize) * sampleRate;
+}
+
+double SpectrogramPlot::plotYForFrequency(double hz)
+{
+    int visibleBins = getNativePlotHeight();
+    if (fftSize <= 0 || visibleBins <= 0 || sampleRate <= 0.0)
+        return 0.0;
+
+    double bin = (0.5 - hz / sampleRate) * fftSize;
+    return (bin - getVisibleBinTop()) * (double)height() / visibleBins;
 }
 
 bool SpectrogramPlot::mouseEvent(QEvent::Type type, QMouseEvent *event)

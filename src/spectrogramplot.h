@@ -69,6 +69,13 @@ public:
     int getVisibleBinTop();
     int getStride();
     int getNativePlotHeight();
+
+    /* Vertical (frequency) mapping of the plot area. y is relative to
+     * the top of the plot rect; these account for the Y zoom / crop
+     * window so they stay valid when only a slice of the FFT is drawn. */
+    double hzPerPixel();
+    double frequencyAtPlotY(double y);
+    double plotYForFrequency(double hz);
     using Plot::setHeight;
     int getLinesPerTile();
     double tunerCentreHz() {

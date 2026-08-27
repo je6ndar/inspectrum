@@ -4,6 +4,55 @@ inspectrum ng v0.5.4-rc0
 Forked from inspectrum v0.4.0.
 
 
+Unreleased
+----------
+New features:
+- Wheel scrolling reworked around time, the axis you actually navigate:
+    * wheel (and Alt+wheel, and a side / tilt wheel) scrolls time
+    * Shift+wheel scrolls frequency -- only does anything when the
+      spectrogram is taller than the view
+    * Ctrl+wheel still zooms
+  A notch scrolls a tenth of the view instead of Qt's default few
+  pixels, and fractional deltas from high-resolution wheels and
+  touchpads are accumulated rather than rounded away to nothing.
+  INSPECTRUM_WHEEL_DEBUG=1 logs what each wheel event reports.
+- Data format selectable in the app: a "Data format" combo next to the
+  sample rate offers the same set as the -f/--format command line
+  option (Auto / cf32 / cf64 / cs32 / cs16 / cs8 / cu8 / f32 / f64 /
+  s16 / s8 / u8 / wav). Picking one re-reads the open file through that
+  adapter; "Auto" goes back to the file extension. A format the file
+  can't be read as reports the error and rolls back to the previous
+  one. The choice is stored in .isession files, and -f still works and
+  now shows up in the combo.
+- Cursor placement without dragging: shift+click moves the nearest time
+  cursor to the pointer, shift+drag sets the selection outright -- the
+  horizontal extent becomes the time selection and, when the bandwidth
+  cursors are on, the vertical extent becomes the measured band. The
+  right-click menu gains "Selection start here" / "Selection end here".
+- Bandwidth selection: horizontal cursor pair on the spectrogram, the
+  frequency counterpart of the existing time cursors. Drag either line
+  to move it, or the band between them to move both. The plot shows the
+  frequency of each line and the bandwidth between them; the controls
+  panel adds Freq high / Freq low / Bandwidth / Centre read-outs and a
+  "Set tuner to selection" button that moves the tuner onto the measured
+  band. Cursor positions are stored in Hz, so they stay on the signal
+  while scrolling and when FFT size / Y zoom change, and they are saved
+  in .isession files. Opacity follows the existing Grid opacity slider.
+
+Bug fixes:
+- "Optimizing FFT plans (first run)..." ran on every run: needsPreWarm()
+  inspected the in-process plan cache, which is empty at every startup,
+  so the answer was always yes and the modal dialog was forced up with
+  minimumDuration(0). It now probes the imported wisdom with
+  FFTW_WISDOM_ONLY and keeps the plans that probe produces, and the
+  dialog only appears if planning really takes longer than 500ms.
+  Startup with usable wisdom: 5.5s -> 0.03s.
+- Frequency scale and SigMF annotation boxes ignored the Y zoom / crop
+  window: with Zoom Y > 1x (or Crop to tuner) the tick labels and the
+  annotation rectangles were placed as if the whole FFT were visible.
+  Both now use the same bin<->pixel mapping as the spectrogram image.
+
+
 v0.5.4-rc0
 ----------
 UI fixes:

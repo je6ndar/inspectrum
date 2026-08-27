@@ -62,14 +62,16 @@ static QString formatTimeTick(double tick)
 }
 }
 
-PlotView::PlotView(InputSource *input) : cursors(this), viewRange({0, 0})
+PlotView::PlotView(InputSource *input) : cursors(this), freqCursors(this), viewRange({0, 0})
 {
     mainSampleSource = input;
     setDragMode(QGraphicsView::ScrollHandDrag);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     setMouseTracking(true);
     enableCursors(false);
+    enableFreqCursors(false);
     connect(&cursors, &Cursors::cursorsMoved, this, &PlotView::cursorsMoved);
+    connect(&freqCursors, &FreqCursors::cursorsMoved, this, &PlotView::freqCursorsMoved);
 
     spectrogramPlot = new SpectrogramPlot(std::shared_ptr<SampleSource<std::complex<float>>>(
         mainSampleSource, [](SampleSource<std::complex<float>>*){}));
@@ -153,173 +155,210 @@ void PlotView::updateAnnotationTooltip(QMouseEvent *event)
 void PlotView::contextMenuEvent(QContextMenuEvent * event)
 {
     QMenu menu;
+    QAction *separator = nullptr;
 
-    // Get selected plot
-    Plot *selectedPlot = nullptr;
-    auto it = plots.begin();
-    int y = -verticalScrollBar()->value();
-    for (; it != plots.end(); it++) {
-        auto&& plot = *it;
-        if (range_t<int>{y, y + plot->height()}.contains(event->pos().y())) {
-            selectedPlot = plot.get();
-            break;
-        }
-        y += plot->height();
+    /* Cursor placement -- the alternative to dragging a cursor across
+     * the whole file (shift+click / shift+drag do the same thing). */
+    if (cursorsEnabled && !cursorsLocked) {
+        int clickX = event->pos().x();
+        auto *selStart = new QAction("Selection start here", &menu);
+        connect(selStart, &QAction::triggered, this, [this, clickX]() {
+            range_t<int> sel = cursors.selection();
+            cursors.setSelection({std::min(clickX, sel.maximum),
+                                  std::max(clickX, sel.maximum)});
+            cursorsMoved();
+        });
+        menu.addAction(selStart);
+
+        auto *selEnd = new QAction("Selection end here", &menu);
+        connect(selEnd, &QAction::triggered, this, [this, clickX]() {
+            range_t<int> sel = cursors.selection();
+            cursors.setSelection({std::min(sel.minimum, clickX),
+                                  std::max(sel.minimum, clickX)});
+            cursorsMoved();
+        });
+        menu.addAction(selEnd);
+        separator = menu.addSeparator();
     }
-    if (selectedPlot == nullptr)
-        return;
 
-    // Add actions to add derived plots
-    // that are compatible with selectedPlot's output
-    QMenu *plotsMenu = menu.addMenu("Add derived plot");
-    auto src = selectedPlot->output();
-    int parentIdx = std::distance(plots.begin(), it);
-    if (!src)
-        return;
-    auto compatiblePlots = as_range(Plots::plots.equal_range(src->sampleType()));
-    for (auto p : compatiblePlots) {
-        auto plotInfo = p.second;
-        auto action = new QAction(QString("Add %1").arg(plotInfo.name), plotsMenu);
-        auto plotCreator = plotInfo.creator;
-        QString typeName = plotInfo.name;
-        connect(
-            action, &QAction::triggered,
-            this, [=]() {
-                Plot *newPlot = plotCreator(src);
-                if (!newPlot) {
-                    CrashLog::log(CrashLog::LOG_ERROR,
-                                   "Plot creator '%s' returned nullptr "
-                                   "(parentIdx=%d, sampleType=%s)",
-                                   typeName.toUtf8().constData(),
-                                   parentIdx,
-                                   src->sampleType().name());
-                    return;
+    /* Plot-specific entries, only when the click landed on a plot.
+     * Wrapped so an early bail-out still leaves the menu above usable. */
+    auto addPlotActions = [&]() {
+        // Get selected plot
+        Plot *selectedPlot = nullptr;
+        auto it = plots.begin();
+        int y = -verticalScrollBar()->value();
+        for (; it != plots.end(); it++) {
+            auto&& plot = *it;
+            if (range_t<int>{y, y + plot->height()}.contains(event->pos().y())) {
+                selectedPlot = plot.get();
+                break;
+            }
+            y += plot->height();
+        }
+        if (selectedPlot == nullptr)
+            return;
+
+        // Add actions to add derived plots
+        // that are compatible with selectedPlot's output
+        QMenu *plotsMenu = menu.addMenu("Add derived plot");
+        auto src = selectedPlot->output();
+        int parentIdx = std::distance(plots.begin(), it);
+        if (!src)
+            return;
+        auto compatiblePlots = as_range(Plots::plots.equal_range(src->sampleType()));
+        for (auto p : compatiblePlots) {
+            auto plotInfo = p.second;
+            auto action = new QAction(QString("Add %1").arg(plotInfo.name), plotsMenu);
+            auto plotCreator = plotInfo.creator;
+            QString typeName = plotInfo.name;
+            connect(
+                action, &QAction::triggered,
+                this, [=]() {
+                    Plot *newPlot = plotCreator(src);
+                    if (!newPlot) {
+                        CrashLog::log(CrashLog::LOG_ERROR,
+                                       "Plot creator '%s' returned nullptr "
+                                       "(parentIdx=%d, sampleType=%s)",
+                                       typeName.toUtf8().constData(),
+                                       parentIdx,
+                                       src->sampleType().name());
+                        return;
+                    }
+                    addPlot(newPlot);
+                    derivedPlotInfos.push_back({parentIdx, typeName});
                 }
-                addPlot(newPlot);
-                derivedPlotInfos.push_back({parentIdx, typeName});
-            }
-        );
-        plotsMenu->addAction(action);
-    }
-
-    // Add submenu for extracting symbols
-    QMenu *extractMenu = menu.addMenu("Extract symbols");
-    // Add action to extract symbols from selected plot to stdout
-    auto extract = new QAction("To stdout", extractMenu);
-    connect(
-        extract, &QAction::triggered,
-        this, [=]() {
-            extractSymbols(src, false);
+            );
+            plotsMenu->addAction(action);
         }
-    );
-    extract->setEnabled(cursorsEnabled && (src->sampleType() == typeid(float)));
-    extractMenu->addAction(extract);
 
-    // Add action to extract symbols from selected plot to clipboard
-    auto extractClipboard = new QAction("Copy to clipboard", extractMenu);
-    connect(
-        extractClipboard, &QAction::triggered,
-        this, [=]() {
-            extractSymbols(src, true);
-        }
-    );
-    extractClipboard->setEnabled(cursorsEnabled && (src->sampleType() == typeid(float)));
-    extractMenu->addAction(extractClipboard);
-
-    // Add submenu for exporting binary/hex from threshold plots
-    auto threshPlot = dynamic_cast<ThresholdPlot*>(selectedPlot);
-    if (threshPlot) {
-        QMenu *binHexMenu = menu.addMenu("Export bin/hex/ascii");
-
-        auto copyBin = new QAction("Copy binary to clipboard", binHexMenu);
-        connect(copyBin, &QAction::triggered, this, [=]() {
-            QGuiApplication::clipboard()->setText(threshPlot->getBinaryString());
-        });
-        copyBin->setEnabled(cursorsEnabled);
-        binHexMenu->addAction(copyBin);
-
-        auto copyHex = new QAction("Copy hex to clipboard", binHexMenu);
-        connect(copyHex, &QAction::triggered, this, [=]() {
-            QGuiApplication::clipboard()->setText(threshPlot->getHexString());
-        });
-        copyHex->setEnabled(cursorsEnabled);
-        binHexMenu->addAction(copyHex);
-
-        auto copyAscii = new QAction("Copy ASCII to clipboard", binHexMenu);
-        connect(copyAscii, &QAction::triggered, this, [=]() {
-            QGuiApplication::clipboard()->setText(threshPlot->getAsciiString());
-        });
-        copyAscii->setEnabled(cursorsEnabled);
-        binHexMenu->addAction(copyAscii);
-
-        auto binToStdout = new QAction("Binary to stdout", binHexMenu);
-        connect(binToStdout, &QAction::triggered, this, [=]() {
-            std::cout << threshPlot->getBinaryString().toStdString() << std::endl;
-        });
-        binToStdout->setEnabled(cursorsEnabled);
-        binHexMenu->addAction(binToStdout);
-
-        auto hexToStdout = new QAction("Hex to stdout", binHexMenu);
-        connect(hexToStdout, &QAction::triggered, this, [=]() {
-            std::cout << threshPlot->getHexString().toStdString() << std::endl;
-        });
-        hexToStdout->setEnabled(cursorsEnabled);
-        binHexMenu->addAction(hexToStdout);
-    }
-
-    // Add action to export the selected samples into a file
-    auto save = new QAction("Export samples to file...", &menu);
-    connect(
-        save, &QAction::triggered,
-        this, [=]() {
-            if (selectedPlot == spectrogramPlot) {
-                exportSamples(spectrogramPlot->tunerEnabled() ? spectrogramPlot->output() : spectrogramPlot->input());
-            } else {
-                exportSamples(src);
-            }
-        }
-    );
-    menu.addAction(save);
-
-    // Add action to export tuner-filtered + resampled
-    if (spectrogramPlot->tunerEnabled()) {
-        auto saveTuner = new QAction("Export tuner-filtered to file...", &menu);
+        // Add submenu for extracting symbols
+        QMenu *extractMenu = menu.addMenu("Extract symbols");
+        // Add action to extract symbols from selected plot to stdout
+        auto extract = new QAction("To stdout", extractMenu);
         connect(
-            saveTuner, &QAction::triggered,
+            extract, &QAction::triggered,
             this, [=]() {
-                exportTunerFiltered();
+                extractSymbols(src, false);
             }
         );
-        menu.addAction(saveTuner);
-    }
+        extract->setEnabled(cursorsEnabled && (src->sampleType() == typeid(float)));
+        extractMenu->addAction(extract);
 
-    // Add action to export full spectrogram as PNG
-    if (selectedPlot == spectrogramPlot) {
-        auto exportPng = new QAction("Export spectrogram to PNG...", &menu);
-        connect(exportPng, &QAction::triggered, this, [this]() {
-            exportSpectrogramPng();
-        });
-        menu.addAction(exportPng);
-    }
+        // Add action to extract symbols from selected plot to clipboard
+        auto extractClipboard = new QAction("Copy to clipboard", extractMenu);
+        connect(
+            extractClipboard, &QAction::triggered,
+            this, [=]() {
+                extractSymbols(src, true);
+            }
+        );
+        extractClipboard->setEnabled(cursorsEnabled && (src->sampleType() == typeid(float)));
+        extractMenu->addAction(extractClipboard);
 
-    // Add action to remove the selected plot
-    int removeIdx = std::distance(plots.begin(), it);
-    auto rem = new QAction("Remove plot", &menu);
-    connect(
-        rem, &QAction::triggered,
-        this, [=]() {
-            if (removeIdx < 0 || removeIdx >= (int)plots.size())
-                return;
-            QPixmapCache::clear();
-            QThreadPool::globalInstance()->waitForDone();
-            if (removeIdx > 0 && (removeIdx - 1) < (int)derivedPlotInfos.size())
-                derivedPlotInfos.erase(derivedPlotInfos.begin() + removeIdx - 1);
-            plots.erase(plots.begin() + removeIdx);
+        // Add submenu for exporting binary/hex from threshold plots
+        auto threshPlot = dynamic_cast<ThresholdPlot*>(selectedPlot);
+        if (threshPlot) {
+            QMenu *binHexMenu = menu.addMenu("Export bin/hex/ascii");
+
+            auto copyBin = new QAction("Copy binary to clipboard", binHexMenu);
+            connect(copyBin, &QAction::triggered, this, [=]() {
+                QGuiApplication::clipboard()->setText(threshPlot->getBinaryString());
+            });
+            copyBin->setEnabled(cursorsEnabled);
+            binHexMenu->addAction(copyBin);
+
+            auto copyHex = new QAction("Copy hex to clipboard", binHexMenu);
+            connect(copyHex, &QAction::triggered, this, [=]() {
+                QGuiApplication::clipboard()->setText(threshPlot->getHexString());
+            });
+            copyHex->setEnabled(cursorsEnabled);
+            binHexMenu->addAction(copyHex);
+
+            auto copyAscii = new QAction("Copy ASCII to clipboard", binHexMenu);
+            connect(copyAscii, &QAction::triggered, this, [=]() {
+                QGuiApplication::clipboard()->setText(threshPlot->getAsciiString());
+            });
+            copyAscii->setEnabled(cursorsEnabled);
+            binHexMenu->addAction(copyAscii);
+
+            auto binToStdout = new QAction("Binary to stdout", binHexMenu);
+            connect(binToStdout, &QAction::triggered, this, [=]() {
+                std::cout << threshPlot->getBinaryString().toStdString() << std::endl;
+            });
+            binToStdout->setEnabled(cursorsEnabled);
+            binHexMenu->addAction(binToStdout);
+
+            auto hexToStdout = new QAction("Hex to stdout", binHexMenu);
+            connect(hexToStdout, &QAction::triggered, this, [=]() {
+                std::cout << threshPlot->getHexString().toStdString() << std::endl;
+            });
+            hexToStdout->setEnabled(cursorsEnabled);
+            binHexMenu->addAction(hexToStdout);
         }
-    );
-    // Don't allow remove the first plot (the spectrogram)
-    rem->setEnabled(it != plots.begin());
-    menu.addAction(rem);
+
+        // Add action to export the selected samples into a file
+        auto save = new QAction("Export samples to file...", &menu);
+        connect(
+            save, &QAction::triggered,
+            this, [=]() {
+                if (selectedPlot == spectrogramPlot) {
+                    exportSamples(spectrogramPlot->tunerEnabled() ? spectrogramPlot->output() : spectrogramPlot->input());
+                } else {
+                    exportSamples(src);
+                }
+            }
+        );
+        menu.addAction(save);
+
+        // Add action to export tuner-filtered + resampled
+        if (spectrogramPlot->tunerEnabled()) {
+            auto saveTuner = new QAction("Export tuner-filtered to file...", &menu);
+            connect(
+                saveTuner, &QAction::triggered,
+                this, [=]() {
+                    exportTunerFiltered();
+                }
+            );
+            menu.addAction(saveTuner);
+        }
+
+        // Add action to export full spectrogram as PNG
+        if (selectedPlot == spectrogramPlot) {
+            auto exportPng = new QAction("Export spectrogram to PNG...", &menu);
+            connect(exportPng, &QAction::triggered, this, [this]() {
+                exportSpectrogramPng();
+            });
+            menu.addAction(exportPng);
+        }
+
+        // Add action to remove the selected plot
+        int removeIdx = std::distance(plots.begin(), it);
+        auto rem = new QAction("Remove plot", &menu);
+        connect(
+            rem, &QAction::triggered,
+            this, [=]() {
+                if (removeIdx < 0 || removeIdx >= (int)plots.size())
+                    return;
+                QPixmapCache::clear();
+                QThreadPool::globalInstance()->waitForDone();
+                if (removeIdx > 0 && (removeIdx - 1) < (int)derivedPlotInfos.size())
+                    derivedPlotInfos.erase(derivedPlotInfos.begin() + removeIdx - 1);
+                plots.erase(plots.begin() + removeIdx);
+            }
+        );
+        // Don't allow remove the first plot (the spectrogram)
+        rem->setEnabled(it != plots.begin());
+        menu.addAction(rem);
+    };
+    addPlotActions();
+
+    /* drop the separator if no plot entries followed it */
+    if (separator != nullptr && menu.actions().last() == separator)
+        menu.removeAction(separator);
+
+    if (menu.isEmpty())
+        return;
 
     updateViewRange(false);
     if(menu.exec(event->globalPos()))
@@ -405,6 +444,8 @@ void PlotView::resetCursorState()
 {
     hadCursors = false;
     savedSelectedSamples = {0, 0};
+    hadFreqCursors = false;
+    savedSelectedFreqs = {0, 0};
 }
 
 void PlotView::enableCursors(bool enabled)
@@ -441,7 +482,191 @@ void PlotView::lockCursors(bool locked)
 void PlotView::setCursorGridOpacity(int opacity)
 {
     cursors.setGridOpacity(opacity);
+    freqCursors.setGridOpacity(opacity);
     viewport()->update();
+}
+
+/* top of the spectrogram plot in viewport coordinates (it is always the
+ * first plot, so it starts at the vertical scroll offset) */
+int PlotView::spectrogramTop()
+{
+    return -verticalScrollBar()->value();
+}
+
+double PlotView::freqAtViewportY(int y)
+{
+    if (spectrogramPlot == nullptr || sampleRate <= 0)
+        return 0;
+    return spectrogramPlot->frequencyAtPlotY(y - spectrogramTop());
+}
+
+int PlotView::viewportYForFreq(double hz)
+{
+    if (spectrogramPlot == nullptr || sampleRate <= 0)
+        return 0;
+    return spectrogramTop()
+         + (int)(spectrogramPlot->plotYForFrequency(hz) + 0.5);
+}
+
+void PlotView::freqCursorsMoved()
+{
+    if (spectrogramPlot == nullptr)
+        return;
+
+    /* keep both cursors inside the spectrogram plot */
+    int top = spectrogramTop();
+    int bot = top + spectrogramPlot->height();
+    range_t<int> sel = freqCursors.selection();
+    range_t<int> clamped = {clamp(sel.minimum, top, bot),
+                            clamp(sel.maximum, top, bot)};
+    if (clamped.minimum != sel.minimum || clamped.maximum != sel.maximum)
+        freqCursors.setSelection(clamped);
+
+    /* screen Y grows downwards, frequency grows upwards */
+    selectedFreqs = {freqAtViewportY(clamped.maximum),
+                     freqAtViewportY(clamped.minimum)};
+
+    emitFreqSelection();
+    viewport()->update();
+}
+
+void PlotView::emitFreqSelection()
+{
+    double low = selectedFreqs.minimum;
+    double high = selectedFreqs.maximum;
+
+    freqCursors.setLabels(
+        QString::fromStdString(formatSIValueSigned(high, "Hz")),
+        QString::fromStdString(formatSIValueSigned(low, "Hz")),
+        QString("BW ") + QString::fromStdString(
+            formatSIValueSigned(high - low, "Hz")));
+
+    emit freqSelectionChanged(low, high);
+}
+
+/* recompute cursor pixel positions from the stored frequencies -- called
+ * whenever the vertical mapping changes (scroll, FFT size, Y zoom, crop) */
+void PlotView::updateFreqCursorPositions()
+{
+    if (!freqCursorsEnabled || spectrogramPlot == nullptr)
+        return;
+
+    freqCursors.setSelection({viewportYForFreq(selectedFreqs.maximum),
+                              viewportYForFreq(selectedFreqs.minimum)});
+}
+
+void PlotView::enableFreqCursors(bool enabled)
+{
+    if (!enabled && freqCursorsEnabled) {
+        savedSelectedFreqs = selectedFreqs;
+        hadFreqCursors = true;
+    }
+
+    freqCursorsEnabled = enabled;
+
+    if (enabled) {
+        if (hadFreqCursors && savedSelectedFreqs.length() > 0) {
+            selectedFreqs = savedSelectedFreqs;
+            updateFreqCursorPositions();
+            emitFreqSelection();
+        } else {
+            /* first time: default to 1/3 margins of the visible height */
+            int margin = viewport()->rect().height() / 3;
+            freqCursors.setSelection({viewport()->rect().top() + margin,
+                                      viewport()->rect().bottom() - margin});
+            freqCursorsMoved();
+        }
+    }
+    viewport()->update();
+}
+
+void PlotView::setFreqSelection(double lowHz, double highHz)
+{
+    if (highHz < lowHz)
+        std::swap(lowHz, highHz);
+    selectedFreqs = {lowHz, highHz};
+    updateFreqCursorPositions();
+    emitFreqSelection();
+    viewport()->update();
+}
+
+/*
+ * Shift+click / Shift+drag cursor placement.
+ *
+ * Dragging a cursor across the whole file to get it where you are is
+ * painful, so shift+drag sets the selection directly: the horizontal
+ * extent of the drag becomes the time selection, the vertical extent
+ * (when the bandwidth cursors are on) becomes the measured band. A
+ * shift+click without dragging moves whichever time cursor is nearer.
+ */
+bool PlotView::cursorPlaceEvent(QEvent::Type type, QMouseEvent *event)
+{
+    if (cursorsLocked || (!cursorsEnabled && !freqCursorsEnabled))
+        return false;
+
+    if (type == QEvent::MouseButtonPress) {
+        if (event->button() != Qt::LeftButton
+            || !(event->modifiers() & Qt::ShiftModifier))
+            return false;
+        cursorPlaceDrag = true;
+        cursorPlaceMoved = false;
+        cursorPlaceStart = event->pos();
+        return true;
+    }
+
+    if (!cursorPlaceDrag)
+        return false;
+
+    if (type == QEvent::MouseMove) {
+        QPoint d = event->pos() - cursorPlaceStart;
+        if (!cursorPlaceMoved && (std::abs(d.x()) > 6 || std::abs(d.y()) > 6))
+            cursorPlaceMoved = true;
+        if (cursorPlaceMoved)
+            applyCursorPlaceDrag(cursorPlaceStart, event->pos());
+        return true;
+    }
+
+    if (type == QEvent::MouseButtonRelease) {
+        if (cursorPlaceMoved)
+            applyCursorPlaceDrag(cursorPlaceStart, event->pos());
+        else if (cursorsEnabled)
+            moveNearestCursorTo(event->pos().x());
+        cursorPlaceDrag = false;
+        return true;
+    }
+
+    return false;
+}
+
+void PlotView::applyCursorPlaceDrag(QPoint from, QPoint to)
+{
+    /* only touch an axis the drag actually moved along, so a horizontal
+     * drag doesn't collapse the bandwidth cursors (and vice versa) */
+    if (cursorsEnabled && std::abs(to.x() - from.x()) > 8) {
+        cursors.setSelection({std::min(from.x(), to.x()),
+                              std::max(from.x(), to.x())});
+        cursorsMoved();
+    }
+    if (freqCursorsEnabled && std::abs(to.y() - from.y()) > 8) {
+        freqCursors.setSelection({std::min(from.y(), to.y()),
+                                  std::max(from.y(), to.y())});
+        freqCursorsMoved();
+    }
+}
+
+void PlotView::moveNearestCursorTo(int x)
+{
+    range_t<int> sel = cursors.selection();
+    int newMin = sel.minimum;
+    int newMax = sel.maximum;
+
+    if (std::abs(x - sel.minimum) <= std::abs(x - sel.maximum))
+        newMin = x;
+    else
+        newMax = x;
+
+    cursors.setSelection({std::min(newMin, newMax), std::max(newMin, newMax)});
+    cursorsMoved();
 }
 
 bool PlotView::viewportEvent(QEvent *event) {
@@ -474,6 +699,59 @@ bool PlotView::viewportEvent(QEvent *event) {
             }
             return true;
         }
+
+        /*
+         * Scrolling. Time is the axis you navigate along, so the plain
+         * wheel scrolls time; shift+wheel scrolls frequency (only useful
+         * when the spectrogram is taller than the view). A side/tilt
+         * wheel scrolls time too, whatever the modifiers.
+         *
+         * Deltas are accumulated: high-resolution wheels send fractions
+         * of a notch (as little as 1/120th), which integer arithmetic
+         * would round away to no movement at all.
+         */
+        QPoint angle = wheelEvent->angleDelta();
+        QPoint pixels = wheelEvent->pixelDelta();
+
+        /* set INSPECTRUM_WHEEL_DEBUG=1 to see what the wheel reports --
+         * a side wheel that does nothing usually isn't reaching Qt */
+        static const bool wheelDebug =
+            qEnvironmentVariableIsSet("INSPECTRUM_WHEEL_DEBUG");
+        if (wheelDebug)
+            qDebug("wheel: angle=(%d,%d) pixel=(%d,%d) mods=0x%x",
+                   angle.x(), angle.y(), pixels.x(), pixels.y(),
+                   (unsigned)wheelEvent->modifiers());
+
+        bool horizontalWheel = std::abs(angle.x()) > std::abs(angle.y())
+                            || std::abs(pixels.x()) > std::abs(pixels.y());
+        int angleDelta = horizontalWheel ? angle.x() : angle.y();
+        int pixelDelta = horizontalWheel ? pixels.x() : pixels.y();
+
+        if (angleDelta == 0 && pixelDelta == 0)
+            return true;
+
+        bool timeScroll = horizontalWheel
+                       || !(wheelEvent->modifiers() & Qt::ShiftModifier);
+        QScrollBar *bar = timeScroll ? horizontalScrollBar()
+                                     : verticalScrollBar();
+
+        int step;
+        if (pixelDelta != 0) {
+            /* touchpads and kinetic scrolling report real pixels */
+            step = -pixelDelta;
+            wheelScrollAccum = 0;
+        } else {
+            /* one notch scrolls a tenth of the view */
+            double stepPx = (timeScroll ? viewport()->width()
+                                        : viewport()->height()) / 10.0;
+            wheelScrollAccum += -angleDelta * stepPx / 120.0;
+            step = (int)wheelScrollAccum;
+            wheelScrollAccum -= step;
+        }
+
+        if (step != 0)
+            bar->setValue(bar->value() + step);
+        return true;
     }
 
     // Pass mouse events to individual plot objects
@@ -482,6 +760,9 @@ bool PlotView::viewportEvent(QEvent *event) {
         event->type() == QEvent::MouseButtonRelease) {
 
         QMouseEvent *mouseEvent = static_cast<QMouseEvent *>(event);
+
+        if (cursorPlaceEvent(event->type(), mouseEvent))
+            return true;
 
         int plotY = -verticalScrollBar()->value();
         for (auto&& plot : plots) {
@@ -506,9 +787,20 @@ bool PlotView::viewportEvent(QEvent *event) {
             plotY += plot->height();
         }
 
-        if (cursorsEnabled && !cursorsLocked)
-            if (cursors.mouseEvent(event->type(), mouseEvent))
-                return true;
+        /* Offer a grab on every cursor line first, so a line that falls
+         * inside the other pair's band stays reachable; only then let a
+         * band be dragged as a whole. */
+        bool timeActive = cursorsEnabled && !cursorsLocked;
+        bool freqActive = freqCursorsEnabled && !cursorsLocked;
+
+        if (timeActive && cursors.lineEvent(event->type(), mouseEvent))
+            return true;
+        if (freqActive && freqCursors.lineEvent(event->type(), mouseEvent))
+            return true;
+        if (timeActive && cursors.bandEvent(event->type(), mouseEvent))
+            return true;
+        if (freqActive && freqCursors.bandEvent(event->type(), mouseEvent))
+            return true;
     }
 
     if (event->type() == QEvent::Leave) {
@@ -518,6 +810,8 @@ bool PlotView::viewportEvent(QEvent *event) {
 
         if (cursorsEnabled && !cursorsLocked)
             cursors.leaveEvent();
+        if (freqCursorsEnabled && !cursorsLocked)
+            freqCursors.leaveEvent();
     }
 
     // Handle parent eveents
@@ -1695,6 +1989,13 @@ void PlotView::paintEvent(QPaintEvent *)
     if (cursorsEnabled)
         cursors.paintFront(painter, rect, viewRange);
 
+    if (freqCursorsEnabled && spectrogramPlot != nullptr) {
+        /* bandwidth cursors only make sense over the spectrogram */
+        QRect specRect(0, spectrogramTop(), viewport()->width(),
+                       spectrogramPlot->height());
+        freqCursors.paintFront(painter, specRect.intersected(rect));
+    }
+
     if (timeScaleEnabled) {
         paintTimeScale(painter, rect, viewRange);
     }
@@ -1881,6 +2182,9 @@ void PlotView::updateView(bool reCenter, bool expanding)
     };
     cursors.setSelection(newSelection);
 
+    // Update bandwidth cursors (anchored in Hz, not pixels)
+    updateFreqCursorPositions();
+
     // Re-paint
     viewport()->update();
 }
@@ -1893,6 +2197,12 @@ void PlotView::setSampleRate(double rate)
         spectrogramPlot->setSampleRate(rate);
 
     emitTimeSelection();
+
+    /* the spectrogram image doesn't move when the sample rate changes,
+     * only the frequency axis does -- keep the cursors where they are
+     * and re-read the frequencies under them */
+    if (freqCursorsEnabled)
+        freqCursorsMoved();
 }
 
 void PlotView::enableScales(bool enabled)

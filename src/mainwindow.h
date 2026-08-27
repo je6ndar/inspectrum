@@ -39,6 +39,7 @@ public slots:
     void setSampleRate(QString rate);
     void setSampleRate(double rate);
     void setFormat(QString fmt);
+    void formatSelected(QString fmt);
     void invalidateEvent() override;
     void saveSession();
     void autoDetectRate();

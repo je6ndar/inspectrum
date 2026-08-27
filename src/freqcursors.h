@@ -24,27 +24,36 @@
 #include <QObject>
 #include <QPainter>
 #include <QPoint>
+#include <QString>
 #include "cursor.h"
 #include "util.h"
 
-class Cursors : public QObject
+/*
+ * Horizontal cursor pair used to measure bandwidth on the spectrogram.
+ *
+ * Same interaction model as Cursors (which measures time), rotated 90
+ * degrees: two draggable lines plus a draggable band in between.
+ * Positions are viewport Y coordinates; PlotView converts them to Hz.
+ */
+class FreqCursors : public QObject
 {
     Q_OBJECT
 
 public:
-    Cursors(QObject * parent);
-    int segments();
+    FreqCursors(QObject * parent);
     bool mouseEvent(QEvent::Type type, QMouseEvent *event);
     /* mouseEvent() split in two so PlotView can offer a grab on every
      * cursor line (time and frequency) before any whole-band drag */
     bool lineEvent(QEvent::Type type, QMouseEvent *event);
     bool bandEvent(QEvent::Type type, QMouseEvent *event);
     void leaveEvent();
-    void paintFront(QPainter &painter, QRect &rect, range_t<size_t> sampleRange);
+    void paintFront(QPainter &painter, const QRect &rect);
     range_t<int> selection();
-    void setSegments(int segments);
     void setSelection(range_t<int> selection);
     void setGridOpacity(int opacity) { gridAlpha = opacity; }
+    /* read-outs drawn next to the cursors (top line, bottom line, band) */
+    void setLabels(const QString &top, const QString &bottom,
+                   const QString &band);
 
 public slots:
     void cursorMoved();
@@ -54,13 +63,16 @@ signals:
 
 private:
     bool pointWithinDragRegion(QPoint point);
-    
-    Cursor *minCursor;
-    Cursor *maxCursor;
-    int segmentCount = 1;
-    
+
+    Cursor *minCursor;   // upper line on screen -- higher frequency
+    Cursor *maxCursor;   // lower line on screen -- lower frequency
+
     QPoint dragPos;                // keep track of dragging distance
     bool cursorOverride = false;   // used to record if cursor is overridden
     bool dragging = false;         // record if mouse is dragging
-    int gridAlpha = 80;             // grid line opacity (0-255)
+    int gridAlpha = 80;            // line opacity (0-255)
+
+    QString topLabel;
+    QString bottomLabel;
+    QString bandLabel;
 };

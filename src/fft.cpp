@@ -61,13 +61,41 @@ void FFT::saveWisdom()
 	wisdomDirty = false;
 }
 
+/*
+ * Is a measuring run needed, or does the wisdom file already cover every
+ * size we use?
+ *
+ * FFTW plans are live objects and can't be serialised; what persists
+ * between runs is "wisdom", the recipe describing which algorithm won
+ * the measurement for each transform. Planning with FFTW_WISDOM_ONLY
+ * fails instead of measuring when that recipe is missing, which lets us
+ * probe the wisdom cheaply -- and keep the plans it does produce, since
+ * they are exactly what preWarm() would have built.
+ */
 bool FFT::needsPreWarm()
 {
 	std::lock_guard<std::mutex> lock(cacheMutex);
+
 	for (int exp = 2; exp <= 17; exp++) {
-		if (!planCache.count(1 << exp))
+		int size = 1 << exp;
+		if (planCache.count(size))
+			continue;
+
+		fftwf_complex *tmp = (fftwf_complex *)fftwf_malloc(
+			sizeof(fftwf_complex) * size);
+		if (!tmp)
 			return true;
+
+		fftwf_plan p = fftwf_plan_dft_1d(size, tmp, tmp,
+			FFTW_FORWARD, FFTW_MEASURE | FFTW_WISDOM_ONLY);
+		fftwf_free(tmp);
+
+		if (!p)
+			return true;   /* no wisdom for this size -- must measure */
+
+		planCache[size] = p;
 	}
+
 	return false;
 }
 
@@ -77,6 +105,7 @@ void FFT::preWarm(std::function<void(int, int)> progress)
 	 * window 2^2..2^14, zero-pad 1x..8x -> FFT sizes 4..131072 */
 	int total = 17 - 2 + 1;  /* exponents 2..17 */
 	int step = 0;
+	int created = 0;
 
 	for (int exp = 2; exp <= 17; exp++) {
 		int size = 1 << exp;
@@ -102,6 +131,7 @@ void FFT::preWarm(std::function<void(int, int)> progress)
 			std::lock_guard<std::mutex> lock(cacheMutex);
 			planCache[size] = p;
 			wisdomDirty = true;
+			created++;
 		}
 
 		fftwf_free(tmp);
@@ -111,7 +141,8 @@ void FFT::preWarm(std::function<void(int, int)> progress)
 		progress(total, total);
 
 	saveWisdom();
-	qDebug() << "FFTW: pre-warmed" << planCache.size() << "plans";
+	qDebug() << "FFTW: measured" << created << "new plans,"
+	         << planCache.size() << "cached";
 }
 
 void FFT::cleanup()

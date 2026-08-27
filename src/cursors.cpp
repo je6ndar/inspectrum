@@ -49,11 +49,22 @@ bool Cursors::pointWithinDragRegion(QPoint point) {
 
 bool Cursors::mouseEvent(QEvent::Type type, QMouseEvent *event)
 {
+    if (lineEvent(type, event))
+        return true;
+    return bandEvent(type, event);
+}
+
+bool Cursors::lineEvent(QEvent::Type type, QMouseEvent *event)
+{
     if (minCursor->mouseEvent(type, event))
         return true;
     if (maxCursor->mouseEvent(type, event))
         return true;
+    return false;
+}
 
+bool Cursors::bandEvent(QEvent::Type type, QMouseEvent *event)
+{
     // If the mouse pointer is between the cursors, display a resize pointer
     if (pointWithinDragRegion(event->pos()) ) {
         if (!cursorOverride) {

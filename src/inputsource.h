@@ -63,6 +63,7 @@ public:
     };
     void setSampleRate(double rate);
     void setFormat(std::string fmt);
+    std::string getFormat() { return _fmt; }
     double rate();
     QString getFileName() { return fileName; }
     bool realSignal() {
